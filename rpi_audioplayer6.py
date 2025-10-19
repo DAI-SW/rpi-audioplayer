@@ -81,13 +81,12 @@ class AudioAnalyzer:
 
         self.stream = None
 
-        # Ringpuffer für Wave-Ansicht
+        # Ringpuffer für Wave-Ansicht (synchron)
         self.wave_secs = 1.0  # ca. 1 Sekunde Verlauf puffern
         buf_len = int(self.sample_rate * self.wave_secs)
         self.wave_buffer = np.zeros(buf_len, dtype=np.float32) if AUDIO_ANALYSIS_AVAILABLE else None
         self.wave_write_idx = 0
         self._lock = threading.Lock()
-
 
     def _callback(self, indata, frames, time_info, status):
         try:
@@ -99,8 +98,10 @@ class AudioAnalyzer:
             # RMS
             self.current_rms_l = float(np.sqrt(np.mean(left ** 2)))
             self.current_rms_r = float(np.sqrt(np.mean(right ** 2)))
+
             # FFT (Mono)
             mono = (left + right) / 2.0
+
             # --- Wellenform in Ringpuffer schreiben ---
             if self.wave_buffer is not None:
                 with self._lock:
@@ -109,11 +110,13 @@ class AudioAnalyzer:
                     L = buf.shape[0]
                     i = self.wave_write_idx % L
                     first = min(n, L - i)
-                    buf[i:i+first] = mono[:first]
+                    buf[i:i + first] = mono[:first]
                     rest = n - first
                     if rest > 0:
-                        buf[0:rest] = mono[first:first+rest]
+                        buf[0:rest] = mono[first:first + rest]
                     self.wave_write_idx = (i + n) % L
+
+            # Spektrum berechnen
             fft = np.fft.rfft(mono)
             magnitude = np.abs(fft)
             num_bands = 20
@@ -178,7 +181,6 @@ class AudioAnalyzer:
                 self.stream.close()
         except Exception:
             pass
-
 
     def get_recent_wave(self, n_samples: int) -> np.ndarray:
         """Gibt die letzten n_samples Mono-Samples zurück (float32)."""
@@ -425,8 +427,8 @@ class AudioPlayerApp(ctk.CTk):
         ctk.CTkLabel(folder_row, text="📁").pack(side="left", padx=(6, 4))
         self.preset_folders = [
             str(Path.home() / "Music"),
-            str(Path.home() / "Music" / "Rock"),
-            str(Path.home() / "Music" / "Jazz"),
+            str(Path.home() / "Music" / "schubert"),
+            str(Path.home() / "Music" / "strauss"),
             str(Path.home() / "Music" / "Classical"),
             str(Path.home() / "Downloads"),
             "/media/usb/music",
@@ -1019,16 +1021,34 @@ class AudioPlayerApp(ctk.CTk):
 
     # ---------- Visualizer ----------
     def _cycle_visualizer(self):
-        idx = self.visualizer_styles.index(self.current_visualizer)
-        idx = (idx + 1) % len(self.visualizer_styles)
+        # zirkulär weiterdrehen
+        if self.current_visualizer not in self.visualizer_styles:
+            self.current_visualizer = self.visualizer_styles[0]
+
+        idx = (self.visualizer_styles.index(self.current_visualizer) + 1) % len(self.visualizer_styles)
         self.current_visualizer = self.visualizer_styles[idx]
+
+        # Label aktualisieren
         self.viz_label.configure(text=f"📊 {self.current_visualizer.upper()}  |  'V' wechseln")
-        if self.current_visualizer == 'none' and self.analyzer:
-            self.analyzer.stop()
-        elif self.current_visualizer != 'none' and not self.analyzer and AUDIO_ANALYSIS_AVAILABLE:
-            self.analyzer = AudioAnalyzer(auto_loopback=bool(self.loopback))
-            prefer = self.config.get("analyzer_input") or (f"{self.loopback.sink_name}.monitor" if self.loopback else None)
-            self.analyzer.start(prefer_device_substr=prefer)
+
+        # Analyzer-Handling
+        if self.current_visualizer == 'none':
+            if self.analyzer:
+                try:
+                    self.analyzer.stop()
+                except Exception:
+                    pass
+                self.analyzer = None
+        else:
+            if AUDIO_ANALYSIS_AVAILABLE:
+                if not self.analyzer:
+                    self.analyzer = AudioAnalyzer(auto_loopback=bool(self.loopback))
+                if not getattr(self.analyzer, "is_active", False):
+                    prefer = self.config.get("analyzer_input") or (
+                        f"{self.loopback.sink_name}.monitor" if self.loopback else None
+                    )
+                    self.analyzer.start(prefer_device_substr=prefer)
+
 
     def _draw_vu(self, width: int, height: int):
         if self.analyzer and AUDIO_ANALYSIS_AVAILABLE:
